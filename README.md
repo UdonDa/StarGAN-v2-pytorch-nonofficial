@@ -35,7 +35,8 @@ If you find this work useful for your research, please cite official [paper](htt
   author={Yunjey Choi and Youngjung Uh and Jaejun Yoo and Jung-Woo Ha},
   journal={arXiv preprint arXiv:1912.01865},
   year={2019}
-}```
+}
+```
 
 ## Acknowledgements
 This repository is based on [stargan official repository](https://github.com/yunjey/stargan).
