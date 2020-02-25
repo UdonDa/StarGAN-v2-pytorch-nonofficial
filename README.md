@@ -14,7 +14,6 @@ If you notice the wrong part, please send the pull request!!
 * [PyTorch 0.4.0+](http://pytorch.org/)
 
 # Usage
-## Downloading datasets
 1. Please download the Animal Faces-HQ dataset (AFHQ). And please move root.
 ```bash
 bash scritpts/download_afhq.sh afhq
