@@ -4,6 +4,11 @@
 
 This repository provides the non-official PyTorch implementation of the following paper:
 
+# Causion!
+Now, my implementation do not work well...
+I think the implementation of the generator is maybe wrong.
+If you notice the wrong part, please send the pull request!!
+
 
 > **StarGAN v2: Diverse Image Synthesis for Multiple Domains**<br>
 > Yunjey Choi*, Youngjung Uh*, Jaejun Yoo*, Jung-Woo Ha<sup>1,2</sup>    <br/>
