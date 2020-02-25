@@ -2,9 +2,7 @@
 
 **\*\*\*\*\* StarGAN v2 official implementation will be available soon at https://github.com/clovaai/stargan-v2 \*\*\*\*\***
 
-This repository provides the non-official PyTorch implementation of the following paper:
-
-# Causion!
+# Caution!
 Now, my implementation do not work well...
 I think the implementation of the generator is maybe wrong.
 If you notice the wrong part, please send the pull request!!
