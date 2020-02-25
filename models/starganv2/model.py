@@ -5,273 +5,338 @@ import numpy as np
 
 class ResidualBlock(nn.Module):
     """Residual Block with instance normalization."""
-    def __init__(self, dim_in, dim_out, affine=True, track_running_stats=True):
+    def __init__(self, dim_in, dim_out, downsample=True, is_first=False):
         super(ResidualBlock, self).__init__()
-        self.dim_in = dim_in
-        self.dim_out = dim_out
         layers = []
-        layers.append(nn.Conv2d(dim_in, dim_out, kernel_size=3, stride=1, padding=1, bias=True))
-        layers.append(nn.InstanceNorm2d(dim_out, affine=True, track_running_stats=True))
-        layers.append(nn.ReLU(inplace=True))
-        layers.append(nn.Conv2d(dim_out, dim_out, kernel_size=3, stride=1, padding=1, bias=True))
-        layers.append(nn.InstanceNorm2d(dim_out, affine=True, track_running_stats=True))
+        self.downsample = downsample
 
+        if not is_first:
+            layers.append(nn.LeakyReLU(0.2))
+            layers.append(nn.Conv2d(dim_in, dim_out, kernel_size=3, stride=1, padding=1, bias=True))
+        else:
+            layers.append(nn.Conv2d(dim_in, dim_out, kernel_size=1, stride=1, padding=0, bias=True))
+
+
+        layers.append(nn.Conv2d(dim_out, dim_out, kernel_size=3, stride=1, padding=1, bias=True))
+        layers.append(nn.LeakyReLU(0.2))
+        layers.append(nn.Conv2d(dim_out, dim_out, kernel_size=3, stride=1, padding=1, bias=True))
+
+        self.conv_up = None
         if dim_in != dim_out:
-            self.conv_up = nn.Conv2d(dim_in, dim_out, kernel_size=1, stride=1, bias=False)
+            self.conv_up = nn.Conv2d(dim_in, dim_out, kernel_size=1, stride=1, padding=0, bias=False)
         
         self.main = nn.Sequential(*layers)
 
-
     def forward(self, x):
-        if self.dim_in != self.dim_out:
-            return F.relu(self.conv_up(x) + self.main(x))
-        else:
-            return F.relu(x + self.main(x))
+        dx = self.main(x)
+        if self.conv_up is not None:
+            x = self.conv_up(x)
+        out = x + dx
 
-def assign_adain_params(adain_params, model):
-    # assign the adain_params to the AdaIN layers in model
-    for m in model.modules():
-        if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
-            bs = adain_params.size(0)
-            mean = torch.mean(adain_params, 1, keepdim=True) # -> [bs, 1]
-            std = torch.std(adain_params, 1, keepdim=True) # -> [bs, 1]
-
-            mean = mean.repeat(1, m.num_features)
-            std = std.repeat(1, m.num_features)
-            m.bias = mean
-            m.weight = std
-
-def get_num_adain_params(model):
-    # return the number of AdaIN parameters needed by the model
-    num_adain_params = 0
-    for m in model.modules():
-        if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
-            num_adain_params += 2*m.num_features
-    return num_adain_params
-
-class AdaptiveInstanceNorm2d(nn.Module):
-    def __init__(self, num_features, eps=1e-5, momentum=0.1):
-        super(AdaptiveInstanceNorm2d, self).__init__()
-        self.num_features = num_features
-        self.eps = eps
-        self.momentum = momentum
-        self.weight = None
-        self.bias = None
-        self.register_buffer('running_mean', torch.zeros(num_features))
-        self.register_buffer('running_var', torch.ones(num_features))
-
-    def forward(self, x): # -> [1, 512, 16, 16])
-        assert self.weight is not None and \
-               self.bias is not None, "Please assign AdaIN weight first"
-        b, c = x.size(0), x.size(1)
-        running_mean = self.running_mean.repeat(b)
-        running_var = self.running_var.repeat(b)
-        x_reshaped = x.contiguous().view(1, b * c, *x.size()[2:])
-        out = F.batch_norm(
-            x_reshaped, running_mean, running_var, self.weight, self.bias,
-            True, self.momentum, self.eps)
-        return out.view(b, c, *x.size()[2:])
-
-    def __repr__(self):
-        return self.__class__.__name__ + '(' + str(self.num_features) + ')'
-
-class Decoder(nn.Module):
-    def __init__(self, in_channel=512, out_channel=3):
-        super(Decoder, self).__init__()
-
-        layers = []
-
-        for i in range(2):
-            layers.append(
-                nn.Sequential(
-                    ResidualBlock(in_channel, in_channel, affine=True, track_running_stats=True),
-                    AdaptiveInstanceNorm2d(in_channel)
-                )
-            )
-        for i in range(4):
-            layers.append(
-                nn.Sequential(
-                    ResidualBlock(in_channel, in_channel//2, affine=True, track_running_stats=True),
-                    AdaptiveInstanceNorm2d(in_channel//2),
-                    nn.Upsample(scale_factor=2)
-                )
-            )
-            in_channel //= 2
-        layers.append(nn.Conv2d(in_channel, out_channel, kernel_size=1, stride=1, bias=True))
-
-        self.block = nn.Sequential(*layers)
-    
-    def forward(self, x, style_code):        
-        assign_adain_params(style_code, self.block)
-
-        out = self.block(x)
+        if self.downsample:
+            out = F.avg_pool2d(out, 2)
 
         return out
 
+class FRN(nn.Module):
+    def __init__(self, num_features, eps=1e-5):
+        super(FRN, self).__init__()
+        self.tau = nn.Parameter(torch.zeros(1, num_features, 1, 1))
+        self.gamma = nn.Parameter(torch.ones(1, num_features, 1, 1))
+        self.beta = nn.Parameter(torch.zeros(1, num_features, 1, 1))
+        self.eps = eps
+
+    def forward(self, x):
+        x = x * torch.rsqrt(torch.mean(x**2, dim=[2, 3], keepdim=True) + self.eps)
+        return torch.max(self.gamma * x + self.beta, self.tau)
+
+class AdaFRN(nn.Module):
+    def __init__(self, style_dim, num_features, eps=1e-5):
+        super(AdaFRN, self).__init__()
+        self.tau = nn.Parameter(torch.zeros(1, num_features, 1, 1))
+        self.fc = nn.Linear(style_dim, num_features*2)
+        self.eps = eps
+
+    def forward(self, x, s):
+        # filter response normalization
+        x = x * torch.rsqrt(torch.mean(x**2, dim=[2, 3], keepdim=True) + self.eps)
+
+        # adaptive gamma and beta prediction
+        h = self.fc(s)
+        h = h.view(h.size(0), h.size(1), 1, 1)
+        gamma, beta = torch.chunk(h, chunks=2, dim=1)
+
+        out = (1 + gamma) * x# + beta
+        return torch.max(out, self.tau)
+
+class AdaINResidualBlock(nn.Module):
+    def __init__(self, dim_in, dim_out, style_dim=64):
+        super(AdaINResidualBlock, self).__init__()
+        self.upsample = (dim_in != dim_out)
+        self.conv1 = nn.Conv2d(dim_in, dim_out, 3, 1, 1)
+        self.conv2 = nn.Conv2d(dim_out, dim_out, 3, 1, 1)
+        self.norm1 = AdaFRN(style_dim, dim_in)
+        self.norm2 = AdaFRN(style_dim, dim_out)
+        self.conv1x1 = None
+        if self.upsample:
+            self.conv1x1 = nn.ConvTranspose2d(dim_in, dim_out, 4, 2, 1)
+
+
+    def residual(self, x, y):
+        x = self.norm1(x, y)
+        if self.upsample:
+            x = F.interpolate(x, scale_factor=2, mode='nearest')
+        x = self.conv1(x)
+        x = self.norm2(x, y)
+        x = self.conv2(x)
+        return x
+
+    def forward(self, x, y):
+        dx = self.residual(x, y)
+        # if self.conv1x1 is not None:
+        #     x = self.conv1x1(x)
+        return dx # + x
+
+class GResidualBlock(nn.Module):
+    def __init__(self, dim_in, dim_out):
+        super(GResidualBlock, self).__init__()
+        layers = []
+        layers.append(nn.Sequential(
+            FRN(dim_in),
+            nn.Conv2d(dim_in, dim_in, kernel_size=3, stride=1, padding=1),
+            FRN(dim_in),
+        ))
+        
+        self.conv1x1 = None
+        if dim_in != dim_out:
+            layers.append(nn.AvgPool2d(3, stride=2, padding=1))
+            self.conv1x1 = nn.Sequential(
+                nn.Conv2d(dim_in, dim_out, kernel_size=1, stride=1, padding=0),
+                nn.AvgPool2d(3, stride=2, padding=1)
+            )
+
+        layers.append(nn.Conv2d(dim_in, dim_out, kernel_size=3, stride=1, padding=1))
+        
+        self.main = nn.Sequential(*layers)
+
+    def forward(self, x):
+
+        dx = self.main(x)
+        if self.conv1x1 is not None:
+            x = self.conv1x1(x)
+        return dx + x
+
+
+
 class Generator(nn.Module):
-    """Generator network."""
-    def __init__(self, in_channel=3, conv_dim=64, c_dim=5, repeat_num=4):
+    def __init__(self, in_dim=3, image_size=256, style_dim=64):
         super(Generator, self).__init__()
-        encoder = []
-        encoder.append(nn.Conv2d(in_channel, conv_dim // 2, kernel_size=1, stride=1, bias=True))
-
-        for i in range(repeat_num):
-            encoder.append(
-                nn.Sequential(
-                    ResidualBlock(conv_dim//2, conv_dim, affine=True, track_running_stats=True),
-                    nn.AvgPool2d(3, stride=2, padding=1)
-                )
-            )
-            if i != (repeat_num-1):
-                conv_dim *= 2
-        encoder.append(
-            nn.Sequential(
-                ResidualBlock(conv_dim, conv_dim, affine=True, track_running_stats=True),
-                ResidualBlock(conv_dim, conv_dim, affine=True, track_running_stats=True)
-            )
+        
+        conv_dim = 2**13 // image_size
+        self.down = nn.Sequential(
+            nn.Conv2d(in_dim, conv_dim, 1, 1, 0),
+            GResidualBlock(conv_dim, conv_dim*2),
+            GResidualBlock(conv_dim*2, conv_dim*4),
+            GResidualBlock(conv_dim*4, conv_dim*6),
+            GResidualBlock(conv_dim*6, conv_dim*8),
+            GResidualBlock(conv_dim*8, conv_dim*16),
+            GResidualBlock(conv_dim*16, conv_dim*16),
+            GResidualBlock(conv_dim*16, conv_dim*16)
         )
 
-        self.encoder = nn.Sequential(*encoder)
-        self.encoder.apply(weights_init_func)
+        self.adain_res_1 = AdaINResidualBlock(conv_dim*16, conv_dim*16, style_dim)
+        self.adain_res_2 = AdaINResidualBlock(conv_dim*16, conv_dim*16, style_dim)
 
-        self.decoder = Decoder(in_channel=conv_dim, out_channel=in_channel)
-        self.decoder.block.apply(weights_init_func)
+        self.up1 = AdaINResidualBlock(conv_dim*16, conv_dim*8, style_dim)
+        self.up2 = AdaINResidualBlock(conv_dim*8, conv_dim*6, style_dim)
+        self.up3 = AdaINResidualBlock(conv_dim*6, conv_dim*4, style_dim)
+        self.up4 = AdaINResidualBlock(conv_dim*4, conv_dim*2, style_dim)
+        self.up5 = AdaINResidualBlock(conv_dim*2, conv_dim, style_dim)
+        self.conv_final = nn.Sequential(
+            FRN(conv_dim),
+            nn.Conv2d(conv_dim, 3, 1, 1, 0))
 
-        self.style_encoder = Discriminator(in_channel=3, conv_dim=16, num_domain=3, num_layers=6, D=64)
-        self.style_encoder.apply(weights_init_func)
+    def forward(self, image, style_code):
+        """
+        Arguments:
+            x {torch.tensor} -- [bs, in_dim, image_size, image_size]
+            s {torch.tensor} -- [bs, style_dim]
+        
+        Returns:
+            fake {torch.tensor} -- [bs, in_dim, image_size, image_size]
+        """
+        # downsample
+        f = self.down(image)
 
-        self.mapping_net = MappingNetwork(
-            in_feature=16, middle_feature=512, num_domain=3, num_layers=6
-        )
-        self.mapping_net.apply(weights_init_adain_linear)
+        # bottleneck
+        f = self.adain_res_1(f, style_code)
+        f = self.adain_res_2(f, style_code)
 
-    def forward(self, x, style_code):
-        ### Down sampling
-        f = self.encoder(x)#; print("f1:", f.size()) # -> [1, 512, 16, 16]
-        fake = self.decoder(f, style_code)
-
-        return fake
-
+        # upsample
+        f = self.up1(f, style_code)
+        f = self.up2(f, style_code)
+        f = self.up3(f, style_code)
+        f = self.up4(f, style_code)
+        f = self.up5(f, style_code)
+        out = self.conv_final(f)
+        return out
 
 class MappingNetwork(nn.Module):
-    def __init__(self, in_feature=16, middle_feature=512, num_domain=3, num_layers=6):
+    def __init__(self, in_dim=64, style_dim=64, hidden_dim=512, num_domain=3, num_layers=6, pixel_norm=False):
         super(MappingNetwork, self).__init__()
-        layers = []
-        layers.append(nn.Linear(in_feature, middle_feature))
-        for _ in range(num_layers):
-            layers.append(
-                nn.Sequential(
-                    nn.Linear(middle_feature, middle_feature),
-                    nn.ReLU()
-                )
-            )
-        self.main = nn.Sequential(*layers)
-        self.classifier = nn.ModuleList([nn.Linear(middle_feature, 64) for _ in range(num_domain)])
-        # layers.append(nn.Linear(middle_feature, 64 * num_domain))
-    
-    def forward(self, code):
-        style_code = self.main(code)
-        style_code_list = [linear(style_code) for linear in self.classifier]
-        return style_code_list
-
-                
+        self.num_domain = num_domain
+        self.pixel_norm = pixel_norm
         
-class Discriminator(nn.Module):
-    def __init__(self, in_channel=3, conv_dim=16, num_domain=3, num_layers=6, D=64):
-        super(Discriminator, self).__init__()
+        layers = [nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.ReLU(),
+        )]
+        for _ in range(num_layers):
+            layers.append(nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+            ))
+        self.main = nn.Sequential(*layers)
+
+        self.classifier = nn.ModuleList([nn.Linear(hidden_dim, style_dim) for _ in range(num_domain)])
+
+    def forward(self, code, condition):
         """
-        conv_dim = 16, D = 64 => style encoder
-        conv_dim = 32, D = 1  => Discriminator
-        """
+        Arguments:
+            code {torch.tensor} -- [bs, in_dim]
+            condition {torch.tensor} -- [bs]
+        
+        Returns:
+            style_code {torch.tensor} -- [bs, style_dim]
+        """        
+        if self.pixel_norm:
+            z = z / torch.norm(z, p=2, dim=1, keepdim=True)
+            z = z / (torch.sqrt(torch.mean(z**2, dim=1, keepdim=True)) + 1e-8)
+        feature = self.main(code)
+
+        out = [classifier(feature) for classifier in self.classifier]
+
+        out = torch.stack(out, dim=1)
+        index = torch.LongTensor(range(condition.size(0))).to(condition.device)
+        style_code = out[index, condition]
+        return style_code
+
+class StyleEncoder(nn.Module):
+    def __init__(self, in_channel=3, image_size=256, num_domain=3, D=64, max_dim=512):
+        super(StyleEncoder, self).__init__()
+        """conv_dim = 16, D = 64 => style encoder"""
+
+        dim_in = 2**13 // image_size
         layers = []
-        layers.append(nn.Conv2d(in_channel, conv_dim, kernel_size=1, stride=1, bias=True))
-        for i in range(num_layers):
-            if i < (num_layers-1):
-                layers.append(
-                    nn.Sequential(
-                        ResidualBlock(conv_dim, conv_dim*2, affine=True, track_running_stats=True),
-                        nn.AvgPool2d(3, stride=2, padding=1)
-                    )
-                )
-                conv_dim *= 2
-            else:
-                layers.append(
-                    nn.Sequential(
-                        ResidualBlock(conv_dim, conv_dim, affine=True, track_running_stats=True),
-                        nn.AvgPool2d(3, stride=2, padding=1)
-                    )
-                )
+        layers.append(ResidualBlock(in_channel, dim_in, downsample=True, is_first=True))
+
+        num_layers = int(np.log2(image_size)) - 2
+
+        for _ in range(1, num_layers):
+            dim_out = min(max_dim, dim_in*2)
+            layers.append(ResidualBlock(dim_in, dim_out, downsample=True, is_first=False))
+            dim_in = dim_out
 
         layers.append(
             nn.Sequential(
                 nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(conv_dim, conv_dim, kernel_size=4, stride=4, padding=1),
+                nn.Conv2d(dim_out, dim_out, kernel_size=4, stride=1, padding=0),
                 nn.LeakyReLU(0.2, inplace=True),
             )
         )
         self.main = nn.Sequential(*layers)
-        self.main.apply(weights_init_func)
-        # self.classifier = nn.Linear(conv_dim, num_domain * D)
 
         self.classifier = nn.ModuleList([
-            nn.Linear(conv_dim, D) for _ in range(num_domain)
+            nn.Linear(dim_out, D) for _ in range(num_domain)
         ])
-        self.classifier.apply(weights_init_func)
 
     
-    def forward(self, z):
-        feature = self.main(z)#; print(feature.size())
+    def forward(self, image, condition):
+        """
+        Arguments:
+            image {torch.tensor} -- [bs, 3, image_size, image_size]
+            condition {torch.tensor} -- [bs]
+        
+        Returns:
+            style {torch.tensor} -- [bs, D]
+        """
+        feature = self.main(image)#; print(feature.size())
         feature = feature.view(feature.size(0), -1)
-        # pred = self.classifier(feature)#; print(pred.size())
         pred_list = [linear(feature) for linear in self.classifier]
-        return pred_list
 
+        pred = torch.stack(pred_list, dim=1)
+        index = torch.LongTensor(range(condition.size(0))).to(condition.device)
+        style = pred[index, condition]
 
+        return style
 
-def weights_init_func(m, init_type='kaiming'):
-    classname = m.__class__.__name__
-    if hasattr(m, 'weight') and (classname.find('Conv')!=-1 or classname.find('Linear')!=-1):
-        if init_type == 'normal':
-            nn.init.normal_(m.weight.data, 0.0, gain)
-        elif init_type == 'xavier':
-            nn.init.xavier_normal_(m.weight.data, gain=gain)
-        elif init_type == 'kaiming':
-            nn.init.kaiming_normal_(m.weight.data, a=0, mode='fan_in')
-        elif init_type == 'orthogonal':
-            nn.init.orthogonal_(m.weight.data, gain=gain)
-        else:
-            raise NotImplementedError('initialization method [%s] is not implemented' % init_type)
-        if hasattr(m, 'bias') and m.bias is not None:
-            nn.init.constant_(m.bias.data, 0.0)
-    elif classname.find('BatchNorm2d') != -1:
-        nn.init.normal_(m.weight.data, 1.0, 0.02)
-        nn.init.constant_(m.bias.data, 0.0)
+class Discriminator(nn.Module):
+    def __init__(self, in_channel=3, image_size=256, num_domain=3, D=1, max_dim=1024):
+        super(Discriminator, self).__init__()
+        """conv_dim = 16, D = 64 => style encoder"""
 
+        dim_in = 2**13 // image_size
+        layers = []
+        layers.append(ResidualBlock(in_channel, dim_in, downsample=True, is_first=True))
 
-def weights_init_adain_linear(m):
-    classname = m.__class__.__name__
-    if hasattr(m, 'weight') and classname.find('Linear')!=-1:
-        nn.init.kaiming_normal_(m.weight.data, a=0, mode='fan_in')
-        m.bias.data.fill_(1.)
+        num_layers = int(np.log2(image_size)) - 2
+
+        for _ in range(1, num_layers):
+            dim_out = min(max_dim, dim_in*2)
+            layers.append(ResidualBlock(dim_in, dim_out, downsample=True, is_first=False))
+            dim_in = dim_out
+
+        layers.append(
+            nn.Sequential(
+                nn.LeakyReLU(0.2),
+                nn.Conv2d(dim_out, dim_out, kernel_size=4, stride=1, padding=0),
+                nn.LeakyReLU(0.2),
+            )
+        )
+        self.main = nn.Sequential(*layers)
+
+        self.classifier = nn.Conv2d(dim_out, num_domain, 1, 1, 0)
+    
+    def forward(self, image, condition):
+        """
+        Arguments:
+            image {torch.tensor} -- [bs, 3, image_size, image_size]
+            condition {torch.tensor} -- [bs]
+        
+        Returns:
+            out {torch.tensor} -- [bs]
+        """
+        feature = self.main(image)
+        logits = self.classifier(feature)
+
+        logits = logits.view(logits.size(0), -1) # [bs, num_domain]
+
+        index = torch.LongTensor(range(condition.size(0))).to(condition.device)
+        out = logits[index, condition]
+
+        return out
 
 if __name__ == "__main__":
-    z = torch.randn(4,3,256,256).cuda()
-    G = Generator().cuda()
-    styleEncoder = Discriminator(in_channel=3, conv_dim=16, num_domain=3, num_layers=6, D=64).cuda()
-    discriminator = Discriminator(in_channel=3, conv_dim=32, num_domain=3, num_layers=6, D=1).cuda()
-    mappingNetwork = MappingNetwork().cuda()
+    bs = 8
+    H, W = 256, 256
+    num_domain = 3
 
-    # # Forward generator
-    # code = torch.randn(4, 16).cuda()
-    # style_list = mappingNetwork(code)
-    # x_style_code = torch.stack([style_list[style_index][batch_index] for batch_index, style_index in zip(range(z.size(0)), [0,2,1,0])]) # [4, 64]
-    # y = G(z, x_style_code)
-    # print("G:", y.size())
+    x = torch.randn(bs, 3, H, W).cuda()
+    y = torch.randperm(bs).cuda() % num_domain
+    z = torch.randn(bs, 16)
 
-    # Forward style encoder
-    y = styleEncoder(z)
-    y = torch.stack([y[style_index][batch_index] for batch_index, style_index in zip(range(z.size(0)), [0,1,2,0])]) # [4, 64]
-    print("styleEncoder:", y.size()) # -> 3, [4, 64]
+    model = Discriminator(in_channel=3, image_size=H, num_domain=num_domain, D=1, max_dim=1024).cuda()
+    pred = model(x, y)
+    print("(D) pred:", pred.shape) # -> [domain]
+    
+    model = StyleEncoder(in_channel=3, image_size=H, num_domain=num_domain, D=64, max_dim=512).cuda()
+    style_code = model(x, y)
+    print("(Enc) pred:", style_code.shape)
 
-    # y = discriminator(z)
-    # print("discriminator:", len(y), y[0].size()) # -> 3, [4, 1]
+    model = MappingNetwork(in_dim=64, style_dim=64, hidden_dim=512, num_domain=num_domain, num_layers=6, pixel_norm=False)
+    pred = model(z, y)
+    print("(MapNet) pred:", pred.size())
+
+    model = Generator(in_dim=3, image_size=256, style_dim=64).cuda()
+    pred = model(x, style_code)
+    print("(G) pred:", pred.shape)

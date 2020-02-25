@@ -53,6 +53,8 @@ if __name__ == '__main__':
     parser.add_argument('--image_size', type=int, default=256, help='image resolution')
     parser.add_argument('--network_G', type=str, default='starganv2')
     parser.add_argument('--network_D', type=str, default='starganv2')
+    parser.add_argument('--network_MF', type=str, default='starganv2')
+    parser.add_argument('--network_Enc', type=str, default='starganv2')
     parser.add_argument('--g_conv_dim', type=int, default=64, help='number of conv filters in the first layer of G')
     parser.add_argument('--d_conv_dim', type=int, default=64, help='number of conv filters in the first layer of D')
     parser.add_argument('--g_repeat_num', type=int, default=6, help='number of residual blocks in G')
@@ -61,6 +63,7 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_ds', type=float, default=1.)
     parser.add_argument('--lambda_cyc', type=float, default=1.)
     parser.add_argument('--latent_code_dim', type=int, default=16)
+    parser.add_argument('--style_code_dim', type=int, default=64)
     parser.add_argument('--lambda_gp', type=float, default=10.)
     
     # Training configuration.
@@ -93,7 +96,7 @@ if __name__ == '__main__':
     # Step size.
     parser.add_argument('--log_step', type=int, default=10)
     parser.add_argument('--sample_step', type=int, default=1000)
-    parser.add_argument('--model_save_step', type=int, default=10000)
+    parser.add_argument('--model_save_step', type=int, default=20000)
     parser.add_argument('--lr_update_step', type=int, default=1000)
 
     config = parser.parse_args()

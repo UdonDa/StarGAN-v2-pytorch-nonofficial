@@ -1,1 +1,0 @@
-python main.py --mode train --network_G models.stargan.model --network_D models.stargan.model

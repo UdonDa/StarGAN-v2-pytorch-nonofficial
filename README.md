@@ -5,6 +5,7 @@
 # Caution!
 Now, my implementation do not work well...  
 This is why it can not generate realistic samples😂.  
+But, you can do the training loop.  
 I think the implementation of the generator is maybe wrong.  
 If you notice the wrong part, please send the pull request!!  
 

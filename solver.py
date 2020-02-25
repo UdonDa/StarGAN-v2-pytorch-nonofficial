@@ -34,6 +34,7 @@ class Solver(object):
         self.lambda_cyc = config.lambda_cyc
         self.lambda_gp = config.lambda_gp
         self.latent_code_dim = config.latent_code_dim
+        self.style_code_dim = config.style_code_dim
 
         # Training configurations.
         self.dataset = config.dataset
@@ -42,6 +43,7 @@ class Solver(object):
         self.num_iters_decay = config.num_iters_decay
         self.g_lr = config.g_lr
         self.d_lr = config.d_lr
+        self.f_lr = config.f_lr
         self.n_critic = config.n_critic
         self.beta1 = config.beta1
         self.beta2 = config.beta2
@@ -72,26 +74,45 @@ class Solver(object):
 
     def build_model(self):
         """Create a generator and a discriminator."""
-        self.G = getattr(importlib.import_module(self.config.network_G), 'Generator')(in_channel=3, conv_dim=64, c_dim=3, repeat_num=4)
-        self.D = getattr(importlib.import_module(self.config.network_D), 'Discriminator')(in_channel=3, conv_dim=32, num_domain=3, num_layers=6, D=1)
+        self.G = getattr(importlib.import_module(self.config.network_G), 'Generator')(in_dim=3, image_size=self.image_size, style_dim=self.style_code_dim)
+        self.D = getattr(importlib.import_module(self.config.network_D), 'Discriminator')(in_channel=3, image_size=self.image_size, num_domain=self.c_dim, D=1, max_dim=1024)
+        self.mapping_function = getattr(importlib.import_module(self.config.network_D), 'MappingNetwork')(in_dim=self.latent_code_dim, style_dim=self.style_code_dim, hidden_dim=512, num_domain=self.c_dim, num_layers=6, pixel_norm=False)
+        self.style_encoder = getattr(importlib.import_module(self.config.network_D), 'StyleEncoder')(in_channel=3, image_size=self.image_size, num_domain=self.c_dim, D=64, max_dim=512)
+        
+        # Initialize weights
+        self.G.apply(self.weight_init_kaiming_normal)
+        self.D.apply(self.weight_init_kaiming_normal)
+        self.mapping_function.apply(self.weight_init_kaiming_normal)
+        self.style_encoder.apply(self.weight_init_kaiming_normal)
 
-        self.G_running = getattr(importlib.import_module(self.config.network_G), 'Generator')()
+        # Exponential moving averages
+        self.G_running = getattr(importlib.import_module(self.config.network_G), 'Generator')(in_dim=3, image_size=self.image_size, style_dim=self.style_code_dim)
+        self.mapping_function_running = getattr(importlib.import_module(self.config.network_D), 'MappingNetwork')(in_dim=self.latent_code_dim, style_dim=self.style_code_dim, hidden_dim=512, num_domain=self.c_dim, num_layers=6, pixel_norm=False)
+        self.style_encoder_running = getattr(importlib.import_module(self.config.network_D), 'StyleEncoder')(in_channel=3, image_size=self.image_size, num_domain=self.c_dim, D=64, max_dim=512)
+        
         self.G_running.train(False)
+        self.mapping_function_running.train(False)
+        self.style_encoder_running.train(False)
 
         self.accumulate(self.G_running, self.G, 0)
+        self.accumulate(self.mapping_function_running, self.mapping_function, 0)
+        self.accumulate(self.style_encoder_running, self.style_encoder, 0)
 
-        # torch.optim.Adam(self.G.parameters(), self.g_lr, [self.beta1, self.beta2])
         self.g_optimizer = torch.optim.Adam([
-                {'params': self.G.encoder.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
-                {'params': self.G.decoder.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
-                {'params': self.G.mapping_net.parameters(), 'lr': self.g_lr * 0.01, 'betas': (self.beta1, self.beta2)},
-                {'params': self.G.style_encoder.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
+                {'params': self.G.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
+                {'params': self.mapping_function.parameters(), 'lr': self.f_lr, 'betas': (self.beta1, self.beta2)},
+                {'params': self.style_encoder.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
             ])
         self.d_optimizer = torch.optim.Adam(self.D.parameters(), self.d_lr, [self.beta1, self.beta2])
         
         self.G.to(self.device)
         self.D.to(self.device)
+        self.mapping_function.to(self.device)
+        self.style_encoder.to(self.device)
+
         self.G_running.to(self.device)
+        self.mapping_function_running.to(self.device)
+        self.style_encoder_running.to(self.device)
 
     def accumulate(self, model1, model2, decay=0.999):
         par1 = dict(model1.named_parameters())
@@ -179,6 +200,17 @@ class Solver(object):
             c_trg_list.append(c_trg.to(self.device))
         return c_trg_list
 
+    
+    def weight_init_kaiming_normal(self, module):
+        if isinstance(module, nn.Conv2d):
+            nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+        if isinstance(module, nn.Linear):
+            nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+
     def train(self):
         """Train StarGAN within a single dataset."""
         # Set data loader.
@@ -243,13 +275,9 @@ class Solver(object):
             # =================================================================================== #
 
             # Compute style code
-            x_style_code_list_1 = self.G.mapping_net(x_code_1) # list, len:self.c_dim, [bs, 64]
-            x_style_code_list_2 = self.G.mapping_net(x_code_2)
-            x_style_code_list_3 = self.G.mapping_net(x_code_3)
-
-            x_style_code_1 = torch.stack([x_style_code_list_1[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_trg)]) # [bs, 64]
-            x_style_code_2 = torch.stack([x_style_code_list_2[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_trg)]) # [bs, 64]
-            x_style_code_3 = torch.stack([x_style_code_list_3[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_trg)]) # [bs, 64]
+            x_style_code_1 = self.mapping_function(x_code_1, label_trg) # [self.batch_size, self.style_dim]
+            x_style_code_2 = self.mapping_function(x_code_2, label_trg)
+            x_style_code_3 = self.mapping_function(x_code_3, label_trg)
 
             # Forward generator
             x_fake_1 = self.G(x_real, x_style_code_1) # For caliculating the adv loss (Eq.1)
@@ -258,26 +286,22 @@ class Solver(object):
 
             # Forward reconstruction
             ## Real -> for caliculating the cyc rec loss (Eq.4)
-            x_real_style_code_list = self.G.style_encoder(x_real)
-            x_real_style_code = torch.stack([x_real_style_code_list[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_org)]) # [bs, 64]
+            x_real_style_code = self.style_encoder(x_real, label_org) # [bs, style_dim]
             x_fake_rec = self.G(x_fake_1, x_real_style_code)
             ## Fake -> for caliculating the sty rec loss (Eq.2)
-            x_fake_style_code_list = self.G.style_encoder(x_fake_1)
-            x_fake_style_code = torch.stack([x_fake_style_code_list[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_org)]) # [bs, 64]
+            x_fake_style_code = self.style_encoder(x_fake_1, label_trg) # [bs, style_dim]
 
             # =================================================================================== #
             #                             3. Train the discriminator                              #
             # =================================================================================== #
 
             # Compute loss with real images.
-            out_src_list = self.D(x_real)
-            out_src = torch.stack([out_src_list[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_org)]) # [bs, 1]
+            out_src = self.D(x_real, label_org)
             # d_loss_real = - torch.mean(out_src) # WGAN
             d_loss_real = self.adv_loss(out_src, lsgan_true)
 
             # Compute loss with fake images.
-            out_src_list = self.D(x_fake_1.detach())
-            out_src = torch.stack([out_src_list[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_trg)]) # [bs, 1]
+            out_src = self.D(x_fake_1.detach(), label_trg)
             # d_loss_fake = torch.mean(out_src) # WGAN
             d_loss_fake = self.adv_loss(out_src, lsgan_fake)
 
@@ -306,8 +330,8 @@ class Solver(object):
             
             if (i+1) % self.n_critic == 0:
                 # Original-to-target domain. (Eq.1)
-                out_src_list = self.D(x_fake_1)
-                out_src = torch.stack([out_src_list[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_org)]) # [bs, 1]
+                out_src = self.D(x_fake_1, label_trg) # TODO: Maybe `label_trg` is ok.
+
                 # g_loss_fake = - torch.mean(out_src) # WGAN
                 g_loss_fake = self.adv_loss(out_src, lsgan_true)
                 
@@ -333,6 +357,8 @@ class Solver(object):
                 loss['G/loss_ds'] = g_loss_ds.item()
 
                 self.accumulate(self.G_running, self.G)
+                self.accumulate(self.mapping_function_running, self.mapping_function)
+                self.accumulate(self.style_encoder_running, self.style_encoder)
 
             # =================================================================================== #
             #                                 4. Miscellaneous                                    #
@@ -369,10 +395,23 @@ class Solver(object):
             if (i+1) % self.model_save_step == 0:
                 G_path = os.path.join(self.model_save_dir, '{}-G.ckpt'.format(i+1))
                 D_path = os.path.join(self.model_save_dir, '{}-D.ckpt'.format(i+1))
+                MF_path = os.path.join(self.model_save_dir, '{}-MF.ckpt'.format(i+1))
+                Enc_path = os.path.join(self.model_save_dir, '{}-Enc.ckpt'.format(i+1))
+
                 G_running_path = os.path.join(self.model_save_dir, '{}-G_running.ckpt'.format(i+1))
+                MF_running_path = os.path.join(self.model_save_dir, '{}-MF_running.ckpt'.format(i+1))
+                Enc_running_path = os.path.join(self.model_save_dir, '{}-Enc_running.ckpt'.format(i+1))
+
+
                 torch.save(self.G.state_dict(), G_path)
                 torch.save(self.D.state_dict(), D_path)
+                torch.save(self.G.state_dict(), MF_path)
+                torch.save(self.D.state_dict(), Enc_path)
+
                 torch.save(self.G_running.state_dict(), G_running_path)
+                torch.save(self.mapping_function_running.state_dict(), MF_running_path)
+                torch.save(self.style_encoder_running.state_dict(), Enc_running_path)
+
                 print('Saved model checkpoints into {}...'.format(self.model_save_dir))
 
             # # Decay learning rates.
@@ -384,7 +423,7 @@ class Solver(object):
 
             # Decay the weight of lambda_ds.
             if (i+1) > self.num_iters_decay:
-                self.lambda_ds -= float(self.default_lambda_ds / 50000)
+                self.lambda_ds -= float(self.default_lambda_ds / self.num_iters_decay)
 
         self.writer.close()
 

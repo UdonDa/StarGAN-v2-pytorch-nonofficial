@@ -2,6 +2,10 @@ python main.py --mode train \
                 --image_dir data/afhq/train \
                 --network_G models.starganv2.model \
                 --network_D models.starganv2.model \
+                --network_MF models.starganv2.model \
+                --network_Enc models.starganv2.model \
+                --latent_code_dim 64 \
+                --style_code_dim 64 \
                 --lambda_sty 0.3 \
                 --lambda_ds 1.0 \
                 --lambda_cyc 0.1 \
