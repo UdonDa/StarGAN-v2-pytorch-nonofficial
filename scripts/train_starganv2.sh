@@ -9,5 +9,4 @@ python main.py --mode train \
                 --beta2 0.99 \
                 --g_lr 0.0001 \
                 --d_lr 0.0001 \
-                --e_lr 0.0001 \
                 --f_lr 0.000001 \

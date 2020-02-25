@@ -24,9 +24,9 @@ class ResidualBlock(nn.Module):
 
     def forward(self, x):
         if self.dim_in != self.dim_out:
-            return self.conv_up(x) + self.main(x)
+            return F.relu(self.conv_up(x) + self.main(x))
         else:
-            return x + self.main(x)
+            return F.relu(x + self.main(x))
 
 def assign_adain_params(adain_params, model):
     # assign the adain_params to the AdaIN layers in model
@@ -76,7 +76,7 @@ class AdaptiveInstanceNorm2d(nn.Module):
         return self.__class__.__name__ + '(' + str(self.num_features) + ')'
 
 class Decoder(nn.Module):
-    def __init__(self, in_channel=512, out_channel=3, in_feature=16, middle_feature=512, num_domain=3, num_layers=6):
+    def __init__(self, in_channel=512, out_channel=3):
         super(Decoder, self).__init__()
 
         layers = []
@@ -97,22 +97,15 @@ class Decoder(nn.Module):
                 )
             )
             in_channel //= 2
-        layers.append(nn.Conv2d(in_channel, out_channel, kernel_size=1, stride=1))
+        layers.append(nn.Conv2d(in_channel, out_channel, kernel_size=1, stride=1, bias=True))
 
         self.block = nn.Sequential(*layers)
-
-        self.mapping_net = MappingNetwork(
-            in_feature=in_feature, middle_feature=middle_feature,
-            num_domain=num_domain, num_layers=num_layers
-        )
-        self.mapping_net.apply(weights_init_adain_linear)
-
     
-    def forward(self, x, code=None):
-        if code is not None:
-            code = self.mapping_net(code)
-        assign_adain_params(code, self.block)
+    def forward(self, x, style_code):        
+        assign_adain_params(style_code, self.block)
+
         out = self.block(x)
+
         return out
 
 class Generator(nn.Module):
@@ -139,17 +132,25 @@ class Generator(nn.Module):
         )
 
         self.encoder = nn.Sequential(*encoder)
-
-        self.decoder = Decoder(in_channel=conv_dim, out_channel=in_channel, in_feature=16, middle_feature=512, num_domain=3, num_layers=6)
-
         self.encoder.apply(weights_init_func)
+
+        self.decoder = Decoder(in_channel=conv_dim, out_channel=in_channel)
         self.decoder.block.apply(weights_init_func)
 
-    def forward(self, x, code=None):
+        self.style_encoder = Discriminator(in_channel=3, conv_dim=16, num_domain=3, num_layers=6, D=64)
+        self.style_encoder.apply(weights_init_func)
+
+        self.mapping_net = MappingNetwork(
+            in_feature=16, middle_feature=512, num_domain=3, num_layers=6
+        )
+        self.mapping_net.apply(weights_init_adain_linear)
+
+    def forward(self, x, style_code):
         ### Down sampling
         f = self.encoder(x)#; print("f1:", f.size()) # -> [1, 512, 16, 16]
-        out = self.decoder(f, code)
-        return out
+        fake = self.decoder(f, style_code)
+
+        return fake
 
 
 class MappingNetwork(nn.Module):
@@ -164,11 +165,15 @@ class MappingNetwork(nn.Module):
                     nn.ReLU()
                 )
             )
-        layers.append(nn.Linear(middle_feature, 64 * num_domain))
         self.main = nn.Sequential(*layers)
+        self.classifier = nn.ModuleList([nn.Linear(middle_feature, 64) for _ in range(num_domain)])
+        # layers.append(nn.Linear(middle_feature, 64 * num_domain))
     
-    def forward(self, z):
-        return self.main(z)
+    def forward(self, code):
+        style_code = self.main(code)
+        style_code_list = [linear(style_code) for linear in self.classifier]
+        return style_code_list
+
                 
         
 class Discriminator(nn.Module):
@@ -176,7 +181,7 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
         """
         conv_dim = 16, D = 64 => style encoder
-        conv_dim = 32, D = 1  => style encoder
+        conv_dim = 32, D = 1  => Discriminator
         """
         layers = []
         layers.append(nn.Conv2d(in_channel, conv_dim, kernel_size=1, stride=1, bias=True))
@@ -205,17 +210,21 @@ class Discriminator(nn.Module):
             )
         )
         self.main = nn.Sequential(*layers)
-        self.classifier = nn.Linear(conv_dim, num_domain * D)
-
         self.main.apply(weights_init_func)
+        # self.classifier = nn.Linear(conv_dim, num_domain * D)
+
+        self.classifier = nn.ModuleList([
+            nn.Linear(conv_dim, D) for _ in range(num_domain)
+        ])
         self.classifier.apply(weights_init_func)
 
     
     def forward(self, z):
         feature = self.main(z)#; print(feature.size())
         feature = feature.view(feature.size(0), -1)
-        pred = self.classifier(feature)#; print(pred.size())
-        return pred
+        # pred = self.classifier(feature)#; print(pred.size())
+        pred_list = [linear(feature) for linear in self.classifier]
+        return pred_list
 
 
 
@@ -252,23 +261,17 @@ if __name__ == "__main__":
     discriminator = Discriminator(in_channel=3, conv_dim=32, num_domain=3, num_layers=6, D=1).cuda()
     mappingNetwork = MappingNetwork().cuda()
 
-    code = torch.randn(4, 16).cuda()
-    # y = mappingNetwork(style_code).cuda()
-    # print("mappingNetwork:", y.size())
+    # # Forward generator
+    # code = torch.randn(4, 16).cuda()
+    # style_list = mappingNetwork(code)
+    # x_style_code = torch.stack([style_list[style_index][batch_index] for batch_index, style_index in zip(range(z.size(0)), [0,2,1,0])]) # [4, 64]
+    # y = G(z, x_style_code)
+    # print("G:", y.size())
 
-    # y = styleEncoder(z)
-    # print("styleEncoder:", y.size())
+    # Forward style encoder
+    y = styleEncoder(z)
+    y = torch.stack([y[style_index][batch_index] for batch_index, style_index in zip(range(z.size(0)), [0,1,2,0])]) # [4, 64]
+    print("styleEncoder:", y.size()) # -> 3, [4, 64]
 
     # y = discriminator(z)
-    # print("discriminator:", y.size())
-    # for m in G.modules():
-    #     if m.__class__.__name__ == "AdaptiveInstanceNorm2d":
-    #         print(m.__class__.__name__)
-
-    # y = G(z, code)
-    # print(y.size())
-
-    
-    
-    
-    # y = G(z)
+    # print("discriminator:", len(y), y[0].size()) # -> 3, [4, 1]

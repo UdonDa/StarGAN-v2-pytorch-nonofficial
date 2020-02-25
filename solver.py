@@ -1,5 +1,6 @@
 # from models.stargan.model import Generator, Discriminator
 import importlib
+import torch.nn as nn
 from torch.autograd import Variable
 from torchvision.utils import save_image
 import torch
@@ -8,7 +9,8 @@ import numpy as np
 import os
 import time
 import datetime
-
+from sys import exit
+import tensorboardX as tbx
 
 class Solver(object):
     """Solver for training and testing StarGAN."""
@@ -26,9 +28,12 @@ class Solver(object):
         self.d_conv_dim = config.d_conv_dim
         self.g_repeat_num = config.g_repeat_num
         self.d_repeat_num = config.d_repeat_num
-        self.lambda_cls = config.lambda_cls
-        self.lambda_rec = config.lambda_rec
+        self.lambda_sty = config.lambda_sty
+        self.lambda_ds = config.lambda_ds
+        self.default_lambda_ds = config.lambda_ds
+        self.lambda_cyc = config.lambda_cyc
         self.lambda_gp = config.lambda_gp
+        self.latent_code_dim = config.latent_code_dim
 
         # Training configurations.
         self.dataset = config.dataset
@@ -62,26 +67,38 @@ class Solver(object):
 
         # Build the model and tensorboard.
         self.build_model()
+        self.writer = tbx.SummaryWriter(self.log_dir)
+
 
     def build_model(self):
         """Create a generator and a discriminator."""
-        self.G = getattr(importlib.import_module(self.config.network_G), 'Generator')()
-        self.D = getattr(importlib.import_module(self.config.network_D), 'Discriminator')()
+        self.G = getattr(importlib.import_module(self.config.network_G), 'Generator')(in_channel=3, conv_dim=64, c_dim=3, repeat_num=4)
+        self.D = getattr(importlib.import_module(self.config.network_D), 'Discriminator')(in_channel=3, conv_dim=32, num_domain=3, num_layers=6, D=1)
 
-        self.g_optimizer = torch.optim.Adam(self.G.parameters(), self.g_lr, [self.beta1, self.beta2])
+        self.G_running = getattr(importlib.import_module(self.config.network_G), 'Generator')()
+        self.G_running.train(False)
+
+        self.accumulate(self.G_running, self.G, 0)
+
+        # torch.optim.Adam(self.G.parameters(), self.g_lr, [self.beta1, self.beta2])
+        self.g_optimizer = torch.optim.Adam([
+                {'params': self.G.encoder.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
+                {'params': self.G.decoder.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
+                {'params': self.G.mapping_net.parameters(), 'lr': self.g_lr * 0.01, 'betas': (self.beta1, self.beta2)},
+                {'params': self.G.style_encoder.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
+            ])
         self.d_optimizer = torch.optim.Adam(self.D.parameters(), self.d_lr, [self.beta1, self.beta2])
         
         self.G.to(self.device)
         self.D.to(self.device)
+        self.G_running.to(self.device)
 
-    def print_network(self, model, name):
-        """Print out the network information."""
-        num_params = 0
-        for p in model.parameters():
-            num_params += p.numel()
-        print(model)
-        print(name)
-        print("The number of parameters: {}".format(num_params))
+    def accumulate(self, model1, model2, decay=0.999):
+        par1 = dict(model1.named_parameters())
+        par2 = dict(model2.named_parameters())
+
+        for k in par1.keys():
+            par1[k].data.mul_(decay).add_(1 - decay, par2[k].data)
 
     def restore_model(self, resume_iters):
         """Restore the trained generator and discriminator."""
@@ -90,11 +107,6 @@ class Solver(object):
         D_path = os.path.join(self.model_save_dir, '{}-D.ckpt'.format(resume_iters))
         self.G.load_state_dict(torch.load(G_path, map_location=lambda storage, loc: storage))
         self.D.load_state_dict(torch.load(D_path, map_location=lambda storage, loc: storage))
-
-    def build_tensorboard(self):
-        """Build a tensorboard logger."""
-        from logger import Logger
-        self.logger = Logger(self.log_dir)
 
     def update_lr(self, g_lr, d_lr):
         """Decay learning rates of the generator and discriminator."""
@@ -203,74 +215,113 @@ class Solver(object):
             except:
                 data_iter = iter(data_loader)
                 x_real, label_org = next(data_iter)
-
+            
             # Generate target domain labels randomly.
             rand_idx = torch.randperm(label_org.size(0))
             label_trg = label_org[rand_idx]
 
-            if self.dataset == 'CelebA':
-                c_org = label_org.clone()
-                c_trg = label_trg.clone()
-            elif self.dataset == 'RaFD':
-                c_org = self.label2onehot(label_org, self.c_dim)
-                c_trg = self.label2onehot(label_trg, self.c_dim)
-
+            # To one-hot
+            c_org = self.label2onehot(label_org, self.c_dim)
+            c_trg = self.label2onehot(label_trg, self.c_dim)
+            
+            # Set tensor to cuda
             x_real = x_real.to(self.device)           # Input images.
             c_org = c_org.to(self.device)             # Original domain labels.
             c_trg = c_trg.to(self.device)             # Target domain labels.
-            label_org = label_org.to(self.device)     # Labels for computing classification loss.
-            label_trg = label_trg.to(self.device)     # Labels for computing classification loss.
+            # print("label_org:", label_org) -> label_org: tensor([0, 2, 1, 0, 2, 2, 1, 2])
+            x_code_1 = torch.randn(self.batch_size, self.latent_code_dim).to(self.device)
+            x_code_2 = torch.randn(self.batch_size, self.latent_code_dim).to(self.device)
+            x_code_3 = torch.randn(self.batch_size, self.latent_code_dim).to(self.device)
+
+            # Adversarial ground truths
+            self.adv_loss = torch.nn.MSELoss().cuda()
+            lsgan_true = torch.Tensor(self.batch_size, 1).fill_(1.0).to(self.device)
+            lsgan_fake = torch.Tensor(self.batch_size, 1).fill_(0.0).to(self.device)
 
             # =================================================================================== #
-            #                             2. Train the discriminator                              #
+            #                             2. Forward the parameters                               #
+            # =================================================================================== #
+
+            # Compute style code
+            x_style_code_list_1 = self.G.mapping_net(x_code_1) # list, len:self.c_dim, [bs, 64]
+            x_style_code_list_2 = self.G.mapping_net(x_code_2)
+            x_style_code_list_3 = self.G.mapping_net(x_code_3)
+
+            x_style_code_1 = torch.stack([x_style_code_list_1[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_trg)]) # [bs, 64]
+            x_style_code_2 = torch.stack([x_style_code_list_2[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_trg)]) # [bs, 64]
+            x_style_code_3 = torch.stack([x_style_code_list_3[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_trg)]) # [bs, 64]
+
+            # Forward generator
+            x_fake_1 = self.G(x_real, x_style_code_1) # For caliculating the adv loss (Eq.1)
+            x_fake_2 = self.G(x_real, x_style_code_2) # For caliculating the ds loss (Eq.3)
+            x_fake_3 = self.G(x_real, x_style_code_3) # For caliculating the ds loss (Eq.3)
+
+            # Forward reconstruction
+            ## Real -> for caliculating the cyc rec loss (Eq.4)
+            x_real_style_code_list = self.G.style_encoder(x_real)
+            x_real_style_code = torch.stack([x_real_style_code_list[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_org)]) # [bs, 64]
+            x_fake_rec = self.G(x_fake_1, x_real_style_code)
+            ## Fake -> for caliculating the sty rec loss (Eq.2)
+            x_fake_style_code_list = self.G.style_encoder(x_fake_1)
+            x_fake_style_code = torch.stack([x_fake_style_code_list[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_org)]) # [bs, 64]
+
+            # =================================================================================== #
+            #                             3. Train the discriminator                              #
             # =================================================================================== #
 
             # Compute loss with real images.
-            out_src, out_cls = self.D(x_real)
-            d_loss_real = - torch.mean(out_src)
-            d_loss_cls = self.classification_loss(out_cls, label_org, self.dataset)
+            out_src_list = self.D(x_real)
+            out_src = torch.stack([out_src_list[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_org)]) # [bs, 1]
+            # d_loss_real = - torch.mean(out_src) # WGAN
+            d_loss_real = self.adv_loss(out_src, lsgan_true)
 
             # Compute loss with fake images.
-            x_fake = self.G(x_real, c_trg)
-            out_src, out_cls = self.D(x_fake.detach())
-            d_loss_fake = torch.mean(out_src)
+            out_src_list = self.D(x_fake_1.detach())
+            out_src = torch.stack([out_src_list[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_trg)]) # [bs, 1]
+            # d_loss_fake = torch.mean(out_src) # WGAN
+            d_loss_fake = self.adv_loss(out_src, lsgan_fake)
 
-            # Compute loss for gradient penalty.
-            alpha = torch.rand(x_real.size(0), 1, 1, 1).to(self.device)
-            x_hat = (alpha * x_real.data + (1 - alpha) * x_fake.data).requires_grad_(True)
-            out_src, _ = self.D(x_hat)
-            d_loss_gp = self.gradient_penalty(out_src, x_hat)
+            # # Compute loss for gradient penalty.
+            # alpha = torch.rand(x_real.size(0), 1, 1, 1).to(self.device)
+            # x_hat = (alpha * x_real.data + (1 - alpha) * x_fake_1.data).requires_grad_(True)
+            # out_src_list = self.D(x_hat)
+            # out_src = torch.stack([out_src_list[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_org)]) # [bs, 1]
+            # d_loss_gp = self.gradient_penalty(out_src, x_hat)
 
             # Backward and optimize.
-            d_loss = d_loss_real + d_loss_fake + self.lambda_cls * d_loss_cls + self.lambda_gp * d_loss_gp
+            d_loss = 0.5 * (d_loss_real + d_loss_fake) # + self.lambda_gp * d_loss_gp
             self.reset_grad()
-            d_loss.backward()
+            d_loss.backward(retain_graph=True)
             self.d_optimizer.step()
 
             # Logging.
             loss = {}
             loss['D/loss_real'] = d_loss_real.item()
             loss['D/loss_fake'] = d_loss_fake.item()
-            loss['D/loss_cls'] = d_loss_cls.item()
-            loss['D/loss_gp'] = d_loss_gp.item()
-            
+            # loss['D/loss_gp'] = d_loss_gp.item()
+
             # =================================================================================== #
-            #                               3. Train the generator                                #
+            #                               4. Train the generator                                #
             # =================================================================================== #
             
             if (i+1) % self.n_critic == 0:
-                # Original-to-target domain.
-                x_fake = self.G(x_real, c_trg)
-                out_src, out_cls = self.D(x_fake)
-                g_loss_fake = - torch.mean(out_src)
-                g_loss_cls = self.classification_loss(out_cls, label_trg, self.dataset)
+                # Original-to-target domain. (Eq.1)
+                out_src_list = self.D(x_fake_1)
+                out_src = torch.stack([out_src_list[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_org)]) # [bs, 1]
+                # g_loss_fake = - torch.mean(out_src) # WGAN
+                g_loss_fake = self.adv_loss(out_src, lsgan_true)
+                
+                # Style reconstruction. (Eq. 2)
+                g_loss_sty = torch.mean(torch.abs(x_style_code_1 - x_fake_style_code))
 
-                # Target-to-original domain.
-                x_reconst = self.G(x_fake, c_org)
-                g_loss_rec = torch.mean(torch.abs(x_real - x_reconst))
+                # Style diversification. (Eq.3)
+                g_loss_ds = torch.mean(torch.abs(x_fake_2 - x_fake_3))
+
+                # Target-to-original domain. (Eq.4)
+                g_loss_rec = torch.mean(torch.abs(x_real - x_fake_rec))
 
                 # Backward and optimize.
-                g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls
+                g_loss = g_loss_fake + self.lambda_sty * g_loss_sty - self.lambda_ds * g_loss_ds + self.lambda_cyc * g_loss_rec
                 self.reset_grad()
                 g_loss.backward()
                 self.g_optimizer.step()
@@ -278,7 +329,10 @@ class Solver(object):
                 # Logging.
                 loss['G/loss_fake'] = g_loss_fake.item()
                 loss['G/loss_rec'] = g_loss_rec.item()
-                loss['G/loss_cls'] = g_loss_cls.item()
+                loss['G/loss_sty'] = g_loss_sty.item()
+                loss['G/loss_ds'] = g_loss_ds.item()
+
+                self.accumulate(self.G_running, self.G)
 
             # =================================================================================== #
             #                                 4. Miscellaneous                                    #
@@ -296,13 +350,16 @@ class Solver(object):
                 # if self.use_tensorboard:
                 #     for tag, value in loss.items():
                 #         self.logger.scalar_summary(tag, value, i+1)
+                for tag, value in loss.items():
+                    self.writer.add_scalar(tag, value, i+1)
 
             # Translate fixed images for debugging.
             if (i+1) % self.sample_step == 0:
                 with torch.no_grad():
                     x_fake_list = [x_fixed]
-                    for c_fixed in c_fixed_list:
-                        x_fake_list.append(self.G(x_fixed, c_fixed))
+                    for _ in range(4):
+                        x_code = torch.randn(self.batch_size, self.latent_code_dim).to(self.device)
+                        x_fake_list.append(self.G_running(x_fixed, x_code))
                     x_concat = torch.cat(x_fake_list, dim=3)
                     sample_path = os.path.join(self.sample_dir, '{}-images.jpg'.format(i+1))
                     save_image(self.denorm(x_concat.data.cpu()), sample_path, nrow=1, padding=0)
@@ -312,16 +369,24 @@ class Solver(object):
             if (i+1) % self.model_save_step == 0:
                 G_path = os.path.join(self.model_save_dir, '{}-G.ckpt'.format(i+1))
                 D_path = os.path.join(self.model_save_dir, '{}-D.ckpt'.format(i+1))
+                G_running_path = os.path.join(self.model_save_dir, '{}-G_running.ckpt'.format(i+1))
                 torch.save(self.G.state_dict(), G_path)
                 torch.save(self.D.state_dict(), D_path)
+                torch.save(self.G_running.state_dict(), G_running_path)
                 print('Saved model checkpoints into {}...'.format(self.model_save_dir))
 
-            # Decay learning rates.
-            if (i+1) % self.lr_update_step == 0 and (i+1) > (self.num_iters - self.num_iters_decay):
-                g_lr -= (self.g_lr / float(self.num_iters_decay))
-                d_lr -= (self.d_lr / float(self.num_iters_decay))
-                self.update_lr(g_lr, d_lr)
-                print ('Decayed learning rates, g_lr: {}, d_lr: {}.'.format(g_lr, d_lr))
+            # # Decay learning rates.
+            # if i % self.lr_update_step == 0 and (i+1) > (self.num_iters - self.num_iters_decay):
+            #     g_lr -= (self.g_lr / float(self.num_iters_decay))
+            #     d_lr -= (self.d_lr / float(self.num_iters_decay))
+            #     self.update_lr(g_lr, d_lr)
+            #     print ('Decayed learning rates, g_lr: {}, d_lr: {}.'.format(g_lr, d_lr))
+
+            # Decay the weight of lambda_ds.
+            if (i+1) > self.num_iters_decay:
+                self.lambda_ds -= float(self.default_lambda_ds / 50000)
+
+        self.writer.close()
 
     def test(self):
         """Translate images using StarGAN trained on a single dataset."""
