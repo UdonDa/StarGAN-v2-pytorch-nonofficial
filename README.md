@@ -10,11 +10,6 @@ I think the implementation of the generator is maybe wrong.
 If you notice the wrong part, please send the pull request!!
 
 
-> **StarGAN v2: Diverse Image Synthesis for Multiple Domains**<br>
-> Yunjey Choi*, Youngjung Uh*, Jaejun Yoo*, Jung-Woo Ha<sup>1,2</sup>    <br/>
-> Clova AI Research, NAVER Corp. (* indicates equal contribution) <br>
-> https://arxiv.org/abs/1912.01865 <br>
-
 
 ## Dependencies
 * [Python 3.6+](https://www.continuum.io/downloads)
@@ -31,6 +26,12 @@ bash scritpts/download_afhq.sh afhq
 
 ## Citation
 If you find this work useful for your research, please cite official [paper](https://arxiv.org/abs/1912.01865):
+
+> **StarGAN v2: Diverse Image Synthesis for Multiple Domains**<br>
+> Yunjey Choi*, Youngjung Uh*, Jaejun Yoo*, Jung-Woo Ha<sup>1,2</sup>    <br/>
+> Clova AI Research, NAVER Corp. (* indicates equal contribution) <br>
+> https://arxiv.org/abs/1912.01865 <br>
+
 ```
 @article{choi2019starganv2,
   title={StarGAN v2: Diverse Image Synthesis for Multiple Domains},
