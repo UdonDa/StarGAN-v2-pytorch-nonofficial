@@ -180,6 +180,7 @@ class Generator(nn.Module):
         f = self.up5(f, style_code)
         out = self.conv_final(f)
         return out
+        # return torch.tanh(out)
 
 class MappingNetwork(nn.Module):
     def __init__(self, in_dim=64, style_dim=64, hidden_dim=512, num_domain=3, num_layers=6, pixel_norm=False):

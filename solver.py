@@ -98,11 +98,19 @@ class Solver(object):
         self.accumulate(self.mapping_function_running, self.mapping_function, 0)
         self.accumulate(self.style_encoder_running, self.style_encoder, 0)
 
-        self.g_optimizer = torch.optim.Adam([
-                {'params': self.G.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
-                {'params': self.mapping_function.parameters(), 'lr': self.f_lr, 'betas': (self.beta1, self.beta2)},
-                {'params': self.style_encoder.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
-            ])
+        # self.g_optimizer = torch.optim.Adam([
+        #         {'params': self.G.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
+        #         {'params': self.mapping_function.parameters(), 'lr': self.f_lr, 'betas': (self.beta1, self.beta2)},
+        #         {'params': self.style_encoder.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
+        #     ])
+        # self.g_optimizer = torch.optim.Adam([
+        #         {'params': self.G.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
+        #         {'params': self.mapping_function.parameters(), 'lr': self.f_lr, 'betas': (self.beta1, self.beta2)},
+        #         {'params': self.style_encoder.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
+        #     ])
+        self.g_optimizer = torch.optim.Adam(self.G.parameters(), self.g_lr, [self.beta1, self.beta2])
+        self.mf_optimizer = torch.optim.Adam(self.mapping_function.parameters(), self.f_lr, [self.beta1, self.beta2])
+        self.enc_optimizer = torch.optim.Adam(self.style_encoder.parameters(), self.g_lr, [self.beta1, self.beta2])
         self.d_optimizer = torch.optim.Adam(self.D.parameters(), self.d_lr, [self.beta1, self.beta2])
         
         self.G.to(self.device)
@@ -140,6 +148,8 @@ class Solver(object):
         """Reset the gradient buffers."""
         self.g_optimizer.zero_grad()
         self.d_optimizer.zero_grad()
+        self.mf_optimizer.zero_grad()
+        self.enc_optimizer.zero_grad()
 
     def denorm(self, x):
         """Convert the range from [-1, 1] to [0, 1]."""
@@ -308,12 +318,12 @@ class Solver(object):
             # # Compute loss for gradient penalty.
             # alpha = torch.rand(x_real.size(0), 1, 1, 1).to(self.device)
             # x_hat = (alpha * x_real.data + (1 - alpha) * x_fake_1.data).requires_grad_(True)
-            # out_src_list = self.D(x_hat)
-            # out_src = torch.stack([out_src_list[style_index.item()][batch_index] for batch_index, style_index in zip(range(self.batch_size), label_org)]) # [bs, 1]
+            # out_src = self.D(x_hat, label_org)
             # d_loss_gp = self.gradient_penalty(out_src, x_hat)
 
             # Backward and optimize.
             d_loss = 0.5 * (d_loss_real + d_loss_fake) # + self.lambda_gp * d_loss_gp
+            # d_loss = d_loss_real + d_loss_fake + self.lambda_gp * d_loss_gp
             self.reset_grad()
             d_loss.backward(retain_graph=True)
             self.d_optimizer.step()
@@ -349,6 +359,8 @@ class Solver(object):
                 self.reset_grad()
                 g_loss.backward()
                 self.g_optimizer.step()
+                self.mf_optimizer.step()
+                self.enc_optimizer.step()
 
                 # Logging.
                 loss['G/loss_fake'] = g_loss_fake.item()
@@ -385,7 +397,8 @@ class Solver(object):
                     x_fake_list = [x_fixed]
                     for _ in range(4):
                         x_code = torch.randn(self.batch_size, self.latent_code_dim).to(self.device)
-                        x_fake_list.append(self.G_running(x_fixed, x_code))
+                        x_style_code = self.mapping_function_running(x_code, label_trg)
+                        x_fake_list.append(self.G_running(x_fixed, x_style_code))
                     x_concat = torch.cat(x_fake_list, dim=3)
                     sample_path = os.path.join(self.sample_dir, '{}-images.jpg'.format(i+1))
                     save_image(self.denorm(x_concat.data.cpu()), sample_path, nrow=1, padding=0)
