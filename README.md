@@ -25,7 +25,7 @@ bash scritpts/download_afhq.sh afhq
 
 
 ## Citation
-If you find this work useful for your research, please cite our [paper](https://arxiv.org/abs/1912.01865):
+If you find this work useful for your research, please cite official [paper](https://arxiv.org/abs/1912.01865):
 ```
 @article{choi2019starganv2,
   title={StarGAN v2: Diverse Image Synthesis for Multiple Domains},
