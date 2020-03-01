@@ -26,7 +26,7 @@ bash scritpts/download_afhq.sh afhq
 
 
 + 10000 iterations.
-+ <p><img src="./imgs/10000-images_running.jpg"/></p> 
+<p><img src="./imgs/10000-images_running.jpg"/></p> 
 
 
 ## Citation
