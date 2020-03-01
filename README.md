@@ -4,10 +4,8 @@
 
 # Caution!
 Now, my implementation do not work well...  
-This is why it can not generate realistic samples😂.  
-But, you can do the training loop.  
-I think the implementation of the generator is maybe wrong.  
-If you notice the wrong part, please send the pull request!!  
+The implementation of models is same as the original ones, maybe.
+So, if you help me, please check the training loop in  `solver.py` .
 
 
 
