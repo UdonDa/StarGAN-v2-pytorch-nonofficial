@@ -74,10 +74,15 @@ class Solver(object):
 
     def build_model(self):
         """Create a generator and a discriminator."""
-        self.G = getattr(importlib.import_module(self.config.network_G), 'Generator')(in_dim=3, image_size=self.image_size, style_dim=self.style_code_dim)
-        self.D = getattr(importlib.import_module(self.config.network_D), 'Discriminator')(in_channel=3, image_size=self.image_size, num_domain=self.c_dim, D=1, max_dim=1024)
-        self.mapping_function = getattr(importlib.import_module(self.config.network_D), 'MappingNetwork')(in_dim=self.latent_code_dim, style_dim=self.style_code_dim, hidden_dim=512, num_domain=self.c_dim, num_layers=6, pixel_norm=False)
-        self.style_encoder = getattr(importlib.import_module(self.config.network_D), 'StyleEncoder')(in_channel=3, image_size=self.image_size, num_domain=self.c_dim, D=64, max_dim=512)
+        # self.G = getattr(importlib.import_module(self.config.network_G), 'Generator')(in_dim=3, image_size=self.image_size, style_dim=self.style_code_dim)
+        # self.D = getattr(importlib.import_module(self.config.network_D), 'Discriminator')(in_channel=3, image_size=self.image_size, num_domain=self.c_dim, D=1, max_dim=1024)
+        # self.mapping_function = getattr(importlib.import_module(self.config.network_D), 'MappingNetwork')(in_dim=self.latent_code_dim, style_dim=self.style_code_dim, hidden_dim=512, num_domain=self.c_dim, num_layers=6, pixel_norm=False)
+        # self.style_encoder = getattr(importlib.import_module(self.config.network_D), 'StyleEncoder')(in_channel=3, image_size=self.image_size, num_domain=self.c_dim, D=64, max_dim=512)
+
+        self.G = getattr(importlib.import_module('models.starganv2.generator'), 'Generator')()
+        self.D = getattr(importlib.import_module('models.starganv2.discriminator'), 'Discriminator')(num_domains=self.c_dim)
+        self.mapping_function = getattr(importlib.import_module('models.starganv2.mapping_func'), 'MappingNetwork')(num_domains=self.c_dim)
+        self.style_encoder = getattr(importlib.import_module('models.starganv2.encoder'), 'Encoder')(num_domains=self.c_dim)
         
         # Initialize weights
         self.G.apply(self.weight_init_kaiming_normal)
@@ -86,9 +91,13 @@ class Solver(object):
         self.style_encoder.apply(self.weight_init_kaiming_normal)
 
         # Exponential moving averages
-        self.G_running = getattr(importlib.import_module(self.config.network_G), 'Generator')(in_dim=3, image_size=self.image_size, style_dim=self.style_code_dim)
-        self.mapping_function_running = getattr(importlib.import_module(self.config.network_D), 'MappingNetwork')(in_dim=self.latent_code_dim, style_dim=self.style_code_dim, hidden_dim=512, num_domain=self.c_dim, num_layers=6, pixel_norm=False)
-        self.style_encoder_running = getattr(importlib.import_module(self.config.network_D), 'StyleEncoder')(in_channel=3, image_size=self.image_size, num_domain=self.c_dim, D=64, max_dim=512)
+        # self.G_running = getattr(importlib.import_module(self.config.network_G), 'Generator')(in_dim=3, image_size=self.image_size, style_dim=self.style_code_dim)
+        # self.mapping_function_running = getattr(importlib.import_module(self.config.network_D), 'MappingNetwork')(in_dim=self.latent_code_dim, style_dim=self.style_code_dim, hidden_dim=512, num_domain=self.c_dim, num_layers=6, pixel_norm=False)
+        # self.style_encoder_running = getattr(importlib.import_module(self.config.network_D), 'StyleEncoder')(in_channel=3, image_size=self.image_size, num_domain=self.c_dim, D=64, max_dim=512)
+
+        self.G_running = getattr(importlib.import_module('models.starganv2.generator'), 'Generator')()
+        self.mapping_function_running = getattr(importlib.import_module('models.starganv2.mapping_func'), 'MappingNetwork')(num_domains=self.c_dim)
+        self.style_encoder_running = getattr(importlib.import_module('models.starganv2.encoder'), 'Encoder')(num_domains=self.c_dim)
         
         self.G_running.train(False)
         self.mapping_function_running.train(False)
@@ -98,11 +107,6 @@ class Solver(object):
         self.accumulate(self.mapping_function_running, self.mapping_function, 0)
         self.accumulate(self.style_encoder_running, self.style_encoder, 0)
 
-        # self.g_optimizer = torch.optim.Adam([
-        #         {'params': self.G.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
-        #         {'params': self.mapping_function.parameters(), 'lr': self.f_lr, 'betas': (self.beta1, self.beta2)},
-        #         {'params': self.style_encoder.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
-        #     ])
         # self.g_optimizer = torch.optim.Adam([
         #         {'params': self.G.parameters(), 'lr':self.g_lr, 'betas': (self.beta1, self.beta2)},
         #         {'params': self.mapping_function.parameters(), 'lr': self.f_lr, 'betas': (self.beta1, self.beta2)},
@@ -231,6 +235,8 @@ class Solver(object):
         x_fixed, c_org = next(data_iter)
         x_fixed = x_fixed.to(self.device)
         c_fixed_list = self.create_labels(c_org, self.c_dim, self.dataset)
+        x_fixed_code_list = [torch.randn(self.batch_size, self.latent_code_dim).to(self.device) for _ in range(4)]
+        c_fixed_label = torch.randperm(self.batch_size).to(self.device) % self.c_dim
 
         # Learning rate cache for decaying.
         g_lr = self.g_lr
@@ -277,8 +283,8 @@ class Solver(object):
 
             # Adversarial ground truths
             self.adv_loss = torch.nn.MSELoss().cuda()
-            lsgan_true = torch.Tensor(self.batch_size, 1).fill_(1.0).to(self.device)
-            lsgan_fake = torch.Tensor(self.batch_size, 1).fill_(0.0).to(self.device)
+            lsgan_true = torch.Tensor(self.batch_size).fill_(1.0).to(self.device)
+            lsgan_fake = torch.Tensor(self.batch_size).fill_(0.0).to(self.device)
 
             # =================================================================================== #
             #                             2. Forward the parameters                               #
@@ -395,10 +401,21 @@ class Solver(object):
             if (i+1) % self.sample_step == 0:
                 with torch.no_grad():
                     x_fake_list = [x_fixed]
-                    for _ in range(4):
-                        x_code = torch.randn(self.batch_size, self.latent_code_dim).to(self.device)
-                        x_style_code = self.mapping_function_running(x_code, label_trg)
+                    # for _ in range(4):
+                    for x_fixed_code in x_fixed_code_list:
+                        x_style_code = self.mapping_function_running(x_fixed_code, c_fixed_label)
                         x_fake_list.append(self.G_running(x_fixed, x_style_code))
+                    x_concat = torch.cat(x_fake_list, dim=3)
+                    sample_path = os.path.join(self.sample_dir, '{}-images_running.jpg'.format(i+1))
+                    save_image(self.denorm(x_concat.data.cpu()), sample_path, nrow=1, padding=0)
+                    print('Saved real and fake images into {}...'.format(sample_path))
+
+                with torch.no_grad():
+                    x_fake_list = [x_fixed]
+                    # for _ in range(4):
+                    for x_fixed_code in x_fixed_code_list:
+                        x_style_code = self.mapping_function(x_fixed_code, c_fixed_label)
+                        x_fake_list.append(self.G(x_fixed, x_style_code))
                     x_concat = torch.cat(x_fake_list, dim=3)
                     sample_path = os.path.join(self.sample_dir, '{}-images.jpg'.format(i+1))
                     save_image(self.denorm(x_concat.data.cpu()), sample_path, nrow=1, padding=0)
@@ -418,8 +435,8 @@ class Solver(object):
 
                 torch.save(self.G.state_dict(), G_path)
                 torch.save(self.D.state_dict(), D_path)
-                torch.save(self.G.state_dict(), MF_path)
-                torch.save(self.D.state_dict(), Enc_path)
+                torch.save(self.mapping_function.state_dict(), MF_path)
+                torch.save(self.style_encoder.state_dict(), Enc_path)
 
                 torch.save(self.G_running.state_dict(), G_running_path)
                 torch.save(self.mapping_function_running.state_dict(), MF_running_path)

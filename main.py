@@ -4,7 +4,8 @@ from solver import Solver
 from data_loader import get_loader
 from torch.backends import cudnn
 
-os.environ["CUDA_VISIBLE_DEVICES"] = '1'
+# os.environ["CUDA_VISIBLE_DEVICES"] = '1'
+os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
 def str2bool(v):
     return v.lower() in ('true')
@@ -47,7 +48,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     # name = 'baseline_wgan'
-    name = 'baseline_lsgan'
+    # name = 'baseline_lsgan'
+    name = 'baseline_original'
 
     # Model configuration.
     parser.add_argument('--c_dim', type=int, default=3, help='dimension of domain labels (1st dataset)')
