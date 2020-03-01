@@ -1,2 +1,4 @@
 results/
 deploy.sh
+results/
+.DS_Store
