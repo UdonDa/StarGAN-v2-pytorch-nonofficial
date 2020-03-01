@@ -20,6 +20,13 @@ bash scritpts/download_afhq.sh afhq
 ```
 2. `bash scripts/train_starganv2.sh`
 
+# Generated results.
++ 2000 iterations.
+<p><img src="./imgs/2000-images.jpg"/></p> 
+
+
++ 10000 iterations.
+
 
 ## Citation
 If you find this work useful for your research, please cite official [paper](https://arxiv.org/abs/1912.01865):
